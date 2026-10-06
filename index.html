@@ -1,0 +1,331 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Balloon Gas Buoyancy & Altitude Simulator</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    canvas { display: block; }
+    input[type=range] { accent-color: #a78bfa; }
+    select { background-color: #1e293b; }
+  </style>
+</head>
+<body class="bg-slate-900 text-gray-100 min-h-screen flex flex-col">
+  <header class="bg-violet-900 py-3 px-6 shadow-lg">
+    <h1 class="text-xl font-bold text-violet-100">Balloon Gas Buoyancy &amp; Altitude Simulator</h1>
+    <p class="text-xs text-violet-300">Atmospheric pressure model · ISA standard · Burst altitude predictor</p>
+  </header>
+
+  <main class="flex-1 flex flex-col lg:flex-row gap-4 p-4 max-w-6xl mx-auto w-full">
+    <!-- Controls -->
+    <aside class="lg:w-80 flex flex-col gap-3" aria-label="Balloon settings">
+      <!-- Balloon config -->
+      <div class="bg-slate-800 rounded-xl p-4 space-y-3">
+        <h2 class="font-semibold text-violet-300 text-sm uppercase tracking-wider">Balloon Configuration</h2>
+        <label class="block text-xs">
+          <span class="text-gray-300">Diameter: <strong id="diamVal">1.5</strong> m</span>
+          <input type="range" id="diamSlider" min="0.5" max="10" step="0.1" value="1.5" class="w-full mt-1" aria-label="Balloon diameter" />
+        </label>
+        <label class="block text-xs">
+          <span class="text-gray-300">Gas type:</span>
+          <select id="gasType" class="w-full mt-1 rounded px-2 py-1 text-sm border border-slate-600 focus:outline-none focus:ring-2 focus:ring-violet-400" aria-label="Gas type">
+            <option value="helium">Helium (He) — 0.164 kg/m³</option>
+            <option value="hydrogen">Hydrogen (H₂) — 0.082 kg/m³</option>
+            <option value="hotair">Hot Air (~70°C) — ~0.95 kg/m³</option>
+          </select>
+        </label>
+        <label class="block text-xs">
+          <span class="text-gray-300">Balloon shell mass: <strong id="shellVal">0.5</strong> kg</span>
+          <input type="range" id="shellSlider" min="0.1" max="5" step="0.1" value="0.5" class="w-full mt-1" aria-label="Balloon shell mass" />
+        </label>
+        <label class="block text-xs">
+          <span class="text-gray-300">Payload mass: <strong id="payloadVal">0.0</strong> kg</span>
+          <input type="range" id="payloadSlider" min="0" max="20" step="0.5" value="0" class="w-full mt-1" aria-label="Payload mass" />
+        </label>
+        <label class="block text-xs">
+          <span class="text-gray-300">Launch altitude: <strong id="launchAltVal">0</strong> m</span>
+          <input type="range" id="launchAlt" min="0" max="5000" step="100" value="0" class="w-full mt-1" aria-label="Launch altitude" />
+        </label>
+      </div>
+
+      <!-- Results summary -->
+      <div class="bg-slate-800 rounded-xl p-4 space-y-2 text-sm">
+        <h2 class="font-semibold text-violet-300 text-sm uppercase tracking-wider">Computed Values</h2>
+        <div class="grid grid-cols-2 gap-x-4 gap-y-1 text-xs">
+          <span class="text-gray-400">Volume</span><span id="resVol" class="font-mono text-right">—</span>
+          <span class="text-gray-400">Gas mass</span><span id="resGasMass" class="font-mono text-right">—</span>
+          <span class="text-gray-400">Buoyancy</span><span id="resBuoy" class="font-mono text-right text-green-300">—</span>
+          <span class="text-gray-400">Total weight</span><span id="resWeight" class="font-mono text-right text-red-300">—</span>
+          <span class="text-gray-400">Net lift</span><span id="resLift" class="font-mono text-right text-yellow-300">—</span>
+          <span class="text-gray-400">Burst altitude</span><span id="resBurst" class="font-mono text-right text-pink-300">—</span>
+          <span class="text-gray-400">Est. drift (5 m/s wind)</span><span id="resDrift" class="font-mono text-right">—</span>
+        </div>
+      </div>
+
+      <button id="simBtn" class="bg-violet-600 hover:bg-violet-500 text-white font-bold px-4 py-2 rounded-lg transition" aria-label="Run simulation">Run Ascent Simulation</button>
+      <button id="resetBtn" class="bg-slate-700 hover:bg-slate-600 text-white font-semibold px-4 py-2 rounded-lg transition" aria-label="Reset simulation">Reset</button>
+    </aside>
+
+    <!-- Charts -->
+    <div class="flex-1 flex flex-col gap-4">
+      <canvas id="ascentCanvas" width="700" height="360" class="w-full bg-slate-800 rounded-xl shadow-xl" role="img" aria-label="Altitude vs time chart"></canvas>
+      <canvas id="liftCanvas" width="700" height="180" class="w-full bg-slate-800 rounded-xl shadow-xl" role="img" aria-label="Lift force vs altitude chart"></canvas>
+      <p class="text-xs text-gray-500 text-center">International Standard Atmosphere (ISA) model · Troposhere lapse rate 6.5 K/km · Burst modeled at max elastic stretch (~3× diameter)</p>
+    </div>
+  </main>
+
+<script>
+const G = 9.80665;
+const R_AIR = 287.05; // J/(kg·K)
+const T0 = 288.15; // K at sea level
+const P0 = 101325; // Pa
+const L  = 0.0065; // K/m lapse rate troposphere
+const RHO0 = 1.225; // kg/m³ sea level air density
+
+const GAS_DENSITY = { helium: 0.164, hydrogen: 0.082, hotair: 0.946 };
+
+function atmoRho(alt) {
+  // ISA troposphere (up to 11000m)
+  if (alt > 11000) alt = 11000;
+  const T = T0 - L * alt;
+  const P = P0 * Math.pow(T / T0, G / (L * R_AIR));
+  return P / (R_AIR * T);
+}
+
+function balloonVolume(diam) {
+  return (4/3) * Math.PI * Math.pow(diam/2, 3);
+}
+
+function burstAlt(initDiam) {
+  // Burst when atmospheric pressure allows volume to expand ~3× → diam ~1.44×
+  const burstDiam = initDiam * 1.44;
+  const burstVol = balloonVolume(burstDiam);
+  const initVol = balloonVolume(initDiam);
+  // P·V = const (isothermal) → burst when rho_air / rho0 = initVol/burstVol
+  const rhoRatio = initVol / burstVol;
+  const targetRho = RHO0 * rhoRatio;
+  // solve alt from rho
+  for (let alt = 0; alt <= 40000; alt += 100) {
+    if (atmoRho(Math.min(alt,11000)) <= targetRho) return alt;
+  }
+  return 40000;
+}
+
+function updateSummary() {
+  const diam = parseFloat(document.getElementById('diamSlider').value);
+  const gas  = document.getElementById('gasType').value;
+  const shell = parseFloat(document.getElementById('shellSlider').value);
+  const payload = parseFloat(document.getElementById('payloadSlider').value);
+  const launchAlt = parseFloat(document.getElementById('launchAlt').value);
+
+  const vol = balloonVolume(diam);
+  const rhoGas = GAS_DENSITY[gas];
+  const gasMass = vol * rhoGas;
+  const rhoAir = atmoRho(launchAlt);
+  const buoyancy = rhoAir * vol * G;
+  const totalMass = gasMass + shell + payload;
+  const totalWeight = totalMass * G;
+  const netLift = buoyancy - totalWeight;
+  const burst = burstAlt(diam);
+
+  // Drift estimate: assume avg ascent rate 3 m/s, wind 5 m/s horizontal
+  const ascentTime = burst / 3; // seconds rough estimate
+  const drift = ascentTime * 5 / 1000; // km
+
+  document.getElementById('resVol').textContent = vol.toFixed(2) + ' m³';
+  document.getElementById('resGasMass').textContent = gasMass.toFixed(3) + ' kg';
+  document.getElementById('resBuoy').textContent = buoyancy.toFixed(2) + ' N';
+  document.getElementById('resWeight').textContent = totalWeight.toFixed(2) + ' N';
+  document.getElementById('resLift').textContent = (netLift >= 0 ? '+' : '') + netLift.toFixed(2) + ' N';
+  document.getElementById('resBurst').textContent = (burst/1000).toFixed(1) + ' km';
+  document.getElementById('resDrift').textContent = drift.toFixed(1) + ' km';
+  return { diam, gas, shell, payload, launchAlt, vol, rhoGas, buoyancy, totalMass, netLift, burst };
+}
+
+function bindSlider(id, displayId, decimals) {
+  const el = document.getElementById(id);
+  const disp = document.getElementById(displayId);
+  function update() { disp.textContent = parseFloat(el.value).toFixed(decimals); updateSummary(); }
+  el.addEventListener('input', update);
+  update();
+}
+
+bindSlider('diamSlider', 'diamVal', 1);
+bindSlider('shellSlider', 'shellVal', 1);
+bindSlider('payloadSlider', 'payloadVal', 1);
+bindSlider('launchAlt', 'launchAltVal', 0);
+document.getElementById('gasType').addEventListener('change', updateSummary);
+
+function runSim() {
+  const { diam, gas, shell, payload, launchAlt, vol, rhoGas, totalMass, netLift, burst } = updateSummary();
+  if (netLift <= 0) {
+    alert('Net lift is negative — balloon cannot ascend. Reduce payload or increase diameter.');
+    return;
+  }
+
+  const dt = 5; // seconds
+  const maxTime = 7200; // 2 hours
+  const data = [];
+  let alt = launchAlt;
+  let vel = 0;
+  const drag = 0.47; // sphere drag coefficient
+  const Cd = drag;
+  const radius = diam / 2;
+
+  for (let t = 0; t <= maxTime; t += dt) {
+    const rhoAir = atmoRho(Math.min(alt, 11000));
+    const area = Math.PI * radius * radius;
+    const b = rhoAir * vol * G;
+    const w = totalMass * G;
+    const dragF = 0.5 * Cd * rhoAir * area * vel * Math.abs(vel);
+    const netF = b - w - dragF;
+    const acc = netF / totalMass;
+    vel += acc * dt;
+    vel = Math.max(vel, 0);
+    alt += vel * dt;
+    data.push({ t, alt, vel, b });
+    if (alt >= burst) break;
+  }
+
+  drawAscentChart(data, burst);
+  drawLiftChart(burst);
+}
+
+function drawAscentChart(data, burst) {
+  const canvas = document.getElementById('ascentCanvas');
+  const W = canvas.width; const H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+
+  // Background
+  const bg = ctx.createLinearGradient(0, 0, 0, H);
+  bg.addColorStop(0, '#0a0520'); bg.addColorStop(1, '#1e1a3a');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+
+  const pad = { t:30, r:60, b:40, l:60 };
+  const iW = W - pad.l - pad.r;
+  const iH = H - pad.t - pad.b;
+  const maxT = data[data.length-1].t;
+  const maxAlt = burst * 1.05;
+
+  function xp(t)   { return pad.l + (t / maxT) * iW; }
+  function yp(alt) { return pad.t + iH - (alt / maxAlt) * iH; }
+
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,0.07)'; ctx.lineWidth = 1;
+  for (let i = 0; i <= 5; i++) {
+    const y = pad.t + (iH/5)*i;
+    ctx.beginPath(); ctx.moveTo(pad.l, y); ctx.lineTo(pad.l+iW, y); ctx.stroke();
+    const altLabel = ((maxAlt * (5-i) / 5) / 1000).toFixed(1);
+    ctx.fillStyle = '#94a3b8'; ctx.font = '10px sans-serif';
+    ctx.fillText(altLabel + ' km', 4, y+4);
+  }
+  for (let i = 0; i <= 6; i++) {
+    const x = pad.l + (iW/6)*i;
+    ctx.beginPath(); ctx.moveTo(x, pad.t); ctx.lineTo(x, pad.t+iH); ctx.stroke();
+    ctx.fillStyle = '#94a3b8'; ctx.font = '10px sans-serif';
+    ctx.fillText(((maxT/6*i)/60).toFixed(0)+'min', x-12, H-6);
+  }
+
+  // Burst line
+  ctx.strokeStyle = 'rgba(244,63,94,0.5)'; ctx.lineWidth = 1; ctx.setLineDash([6,4]);
+  const yBurst = yp(burst);
+  ctx.beginPath(); ctx.moveTo(pad.l, yBurst); ctx.lineTo(pad.l+iW, yBurst); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = '#f43f5e'; ctx.font = '10px sans-serif';
+  ctx.fillText('BURST ' + (burst/1000).toFixed(1)+'km', pad.l+4, yBurst-3);
+
+  // Altitude line
+  ctx.strokeStyle = '#a78bfa'; ctx.lineWidth = 2.5;
+  ctx.shadowColor = '#a78bfa'; ctx.shadowBlur = 8;
+  ctx.beginPath();
+  data.forEach((d,i) => { if(i===0) ctx.moveTo(xp(d.t),yp(d.alt)); else ctx.lineTo(xp(d.t),yp(d.alt)); });
+  ctx.stroke(); ctx.shadowBlur = 0;
+
+  // Labels
+  ctx.fillStyle = '#c4b5fd'; ctx.font = 'bold 12px sans-serif';
+  ctx.fillText('Altitude vs Time', pad.l, 18);
+}
+
+function drawLiftChart(burst) {
+  const canvas = document.getElementById('liftCanvas');
+  const W = canvas.width; const H = canvas.height;
+  const ctx = canvas.getContext('2d');
+  ctx.clearRect(0, 0, W, H);
+  const bg = ctx.createLinearGradient(0,0,0,H);
+  bg.addColorStop(0,'#0f0a20'); bg.addColorStop(1,'#1a152e');
+  ctx.fillStyle=bg; ctx.fillRect(0,0,W,H);
+
+  const diam = parseFloat(document.getElementById('diamSlider').value);
+  const vol  = balloonVolume(diam);
+  const gas  = document.getElementById('gasType').value;
+  const rhoGas = GAS_DENSITY[gas];
+  const shell = parseFloat(document.getElementById('shellSlider').value);
+  const payload = parseFloat(document.getElementById('payloadSlider').value);
+  const totalMass = vol * rhoGas + shell + payload;
+
+  const pad = {t:20,r:40,b:30,l:60};
+  const iW = W-pad.l-pad.r; const iH = H-pad.t-pad.b;
+  const maxAlt = burst*1.05;
+  const liftPts = [];
+  for (let alt = 0; alt <= burst; alt += burst/80) {
+    const rho = atmoRho(Math.min(alt, 11000));
+    const lift = (rho * vol - totalMass) * G;
+    liftPts.push({ alt, lift });
+  }
+  const maxLift = Math.max(...liftPts.map(p=>p.lift));
+  const minLift = Math.min(...liftPts.map(p=>p.lift), 0);
+  const span = maxLift - minLift || 1;
+
+  function xp(alt)  { return pad.l + (alt/maxAlt)*iW; }
+  function yp(lift) { return pad.t + iH - ((lift - minLift)/span)*iH; }
+
+  ctx.strokeStyle='rgba(255,255,255,0.07)'; ctx.lineWidth=1;
+  [0,0.25,0.5,0.75,1].forEach(f=>{
+    const y=pad.t+f*iH; ctx.beginPath(); ctx.moveTo(pad.l,y); ctx.lineTo(pad.l+iW,y); ctx.stroke();
+    const lv=(maxLift-(f*span)+minLift).toFixed(0);
+    ctx.fillStyle='#94a3b8'; ctx.font='10px sans-serif'; ctx.fillText(lv+'N',2,y+3);
+  });
+
+  // Zero line
+  const y0 = yp(0);
+  ctx.strokeStyle='rgba(255,255,255,0.2)'; ctx.lineWidth=1; ctx.setLineDash([4,3]);
+  ctx.beginPath(); ctx.moveTo(pad.l,y0); ctx.lineTo(pad.l+iW,y0); ctx.stroke(); ctx.setLineDash([]);
+
+  ctx.strokeStyle='#4ade80'; ctx.lineWidth=2;
+  ctx.beginPath();
+  liftPts.forEach((p,i)=>{ if(i===0)ctx.moveTo(xp(p.alt),yp(p.lift)); else ctx.lineTo(xp(p.alt),yp(p.lift)); });
+  ctx.stroke();
+  ctx.fillStyle='#86efac'; ctx.font='bold 11px sans-serif';
+  ctx.fillText('Net Lift Force vs Altitude', pad.l, 14);
+}
+
+document.getElementById('simBtn').addEventListener('click', runSim);
+document.getElementById('resetBtn').addEventListener('click', ()=>{
+  ['ascentCanvas','liftCanvas'].forEach(id=>{
+    const c=document.getElementById(id);
+    const ctx=c.getContext('2d');
+    ctx.clearRect(0,0,c.width,c.height);
+    const bg=ctx.createLinearGradient(0,0,0,c.height);
+    bg.addColorStop(0,'#0f0a20'); bg.addColorStop(1,'#1a152e');
+    ctx.fillStyle=bg; ctx.fillRect(0,0,c.width,c.height);
+    ctx.fillStyle='#64748b'; ctx.font='14px sans-serif'; ctx.textAlign='center';
+    ctx.fillText('Press "Run Ascent Simulation"', c.width/2, c.height/2);
+    ctx.textAlign='left';
+  });
+});
+document.getElementById('resetBtn').click();
+
+function resizeCanvases() {
+  ['ascentCanvas','liftCanvas'].forEach(id=>{
+    const c = document.getElementById(id);
+    c.width = c.parentElement.clientWidth;
+  });
+}
+window.addEventListener('resize', resizeCanvases);
+resizeCanvases();
+updateSummary();
+</script>
+</body>
+</html>
